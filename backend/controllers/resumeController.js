@@ -1,7 +1,9 @@
 const Resume = require('../models/Resume');
 const axios = require('axios');
+
+// Sirf EK hi callGemini function rakhein jo latest model use kare
 async function callGemini(resume, job) {
-  const prompt = `Analyze this resume against the job description. 
+  const prompt = `Analyze this resume against the job description and give score according ot resume . 
   Return ONLY a valid JSON object with these exact keys:
   {
     "score": 85,
@@ -13,60 +15,28 @@ async function callGemini(resume, job) {
   JD: ${job}`;
 
   try {
+    // Variable name exact wahi rakhein jo Vercel settings mein hai (GEMINI_API_KEY)
+    const apiKey = process.env.GEMINI_API_KEY; 
+    
     const res = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
       { contents: [{ parts: [{ text: prompt }] }] }
     );
 
     let text = res.data.candidates[0].content.parts[0].text;
     
-    // Markdown hatane ke liye
+    // AI kabhi kabhi markdown (```json) bhejta hai, usay saaf karein
     const cleanJson = text.replace(/```json|```/g, "").trim();
     return JSON.parse(cleanJson);
+
   } catch (error) {
-    console.error("Gemini Error:", error.response?.data || error.message);
+    console.error("Gemini API Error:", error.response?.data || error.message);
+    // Error case mein default values bhejien taaki frontend crash na ho
     return {
       score: 0,
       atsScore: 0,
-      suggestions: ["Error connecting to AI"],
-      corrected: "AI could not process this request. Check API Key."
-    };
-  }
-}
-async function callGemini(resume, job) {
-  const prompt = `
-Compare Resume with Job Description.
-Return JSON only:
-
-{
-  "score": number,
-  "atsScore": number,
-  "suggestions": [],
-  "corrected": ""
-}
-
-Resume:
-${resume}
-
-Job Description:
-${job}
-  `;
-
-  const res = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${process.env.GEMINI_KEY}`,
-    { contents: [{ parts: [{ text: prompt }] }] }
-  );
-
-  let text = res.data.candidates[0].content.parts[0].text;
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    return {
-      score: 70,
-      atsScore: 65,
-      suggestions: ['Improve keywords', 'Match job skills'],
-      corrected: resume
+      suggestions: ["Check API Key or Connection"],
+      corrected: "Error: AI analysis could not be completed at this moment."
     };
   }
 }
@@ -76,8 +46,14 @@ exports.analyzeResumeText = async (req, resumeText, jobDescription) => {
     const resume = resumeText || req.body.text;
     const job = jobDescription || req.body.jobDescription;
 
+    if (!resume || !job) {
+       return { message: 'Missing resume text or job description' };
+    }
+
+    // AI Function Call
     const ai = await callGemini(resume, job);
 
+    // Database mein save karein
     const saved = await Resume.create({
       userId: req.user.id,
       originalText: resume,
@@ -87,15 +63,20 @@ exports.analyzeResumeText = async (req, resumeText, jobDescription) => {
       suggestions: ai.suggestions
     });
 
+    // Frontend ko data bhejien
     return { ai, resume: saved };
 
   } catch (e) {
-    console.error(e);
+    console.error("Controller Error:", e);
     return { message: 'Server Error' };
   }
 };
 
 exports.getHistory = async (req, res) => {
-  const data = await Resume.find({ userId: req.user.id });
-  res.json(data);
+  try {
+    const data = await Resume.find({ userId: req.user.id }).sort({ createdAt: -1 });
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching history" });
+  }
 };
