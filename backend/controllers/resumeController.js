@@ -1,6 +1,38 @@
 const Resume = require('../models/Resume');
 const axios = require('axios');
+async function callGemini(resume, job) {
+  const prompt = `Analyze this resume against the job description. 
+  Return ONLY a valid JSON object with these exact keys:
+  {
+    "score": 85,
+    "atsScore": 80,
+    "suggestions": ["skill 1", "skill 2"],
+    "corrected": "detailed feedback here"
+  }
+  Resume: ${resume}
+  JD: ${job}`;
 
+  try {
+    const res = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      { contents: [{ parts: [{ text: prompt }] }] }
+    );
+
+    let text = res.data.candidates[0].content.parts[0].text;
+    
+    // Markdown hatane ke liye
+    const cleanJson = text.replace(/```json|```/g, "").trim();
+    return JSON.parse(cleanJson);
+  } catch (error) {
+    console.error("Gemini Error:", error.response?.data || error.message);
+    return {
+      score: 0,
+      atsScore: 0,
+      suggestions: ["Error connecting to AI"],
+      corrected: "AI could not process this request. Check API Key."
+    };
+  }
+}
 async function callGemini(resume, job) {
   const prompt = `
 Compare Resume with Job Description.
