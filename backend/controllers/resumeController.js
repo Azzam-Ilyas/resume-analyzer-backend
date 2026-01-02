@@ -1,10 +1,22 @@
 const Resume = require('../models/Resume');
 const axios = require('axios');
 
-// Sirf EK hi callGemini function rakhein jo latest model use kare
 async function callGemini(resume, job) {
-  const prompt = `Analyze this resume against the job description and give score according ot resume . 
-  Return ONLY a valid JSON object with these exact keys:
+  // 1. Variable check with fallback
+  const apiKey = process.env.GEMINI_API_KEY; 
+  
+  if (!apiKey) {
+    console.error("ERROR: GEMINI_API_KEY missing in environment variables!");
+    return {
+      score: 0,
+      atsScore: 0,
+      suggestions: ["Backend Config Error: Key Missing"],
+      corrected: "API Key is not configured on the server. Please add GEMINI_API_KEY to Vercel settings."
+    };
+  }
+
+  const prompt = `Analyze this resume against the job description. 
+  Return ONLY a valid JSON object. Do not include any text before or after the JSON.
   {
     "score": 85,
     "atsScore": 80,
@@ -15,28 +27,45 @@ async function callGemini(resume, job) {
   JD: ${job}`;
 
   try {
-    // Variable name exact wahi rakhein jo Vercel settings mein hai (GEMINI_API_KEY)
-    const apiKey = process.env.GEMINI_API_KEY; 
-    
     const res = await axios.post(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
       { contents: [{ parts: [{ text: prompt }] }] }
     );
 
-    let text = res.data.candidates[0].content.parts[0].text;
+    // 2. Safely get the text response
+    const candidates = res.data?.candidates;
+    if (!candidates || candidates.length === 0) {
+      throw new Error("No response from AI model.");
+    }
+
+    let aiText = candidates[0].content.parts[0].text;
     
-    // AI kabhi kabhi markdown (```json) bhejta hai, usay saaf karein
-    const cleanJson = text.replace(/```json|```/g, "").trim();
-    return JSON.parse(cleanJson);
+    // 3. Clean JSON Markdown (```json ... ```)
+    const cleanJsonText = aiText.replace(/```json|```/g, "").trim();
+    
+    // 4. Try to parse JSON
+    try {
+      return JSON.parse(cleanJsonText);
+    } catch (parseError) {
+      console.error("JSON Parse Error. Raw AI Text:", aiText);
+      // Fallback if AI sends plain text instead of JSON
+      return {
+        score: 50,
+        atsScore: 50,
+        suggestions: ["Improve keywords"],
+        corrected: aiText.substring(0, 500) // First 500 chars as feedback
+      };
+    }
 
   } catch (error) {
-    console.error("Gemini API Error:", error.response?.data || error.message);
-    // Error case mein default values bhejien taaki frontend crash na ho
+    const errorMsg = error.response?.data?.error?.message || error.message;
+    console.error("Gemini API Error Detail:", errorMsg);
+    
     return {
       score: 0,
       atsScore: 0,
-      suggestions: ["Check API Key or Connection"],
-      corrected: "Error: AI analysis could not be completed at this moment."
+      suggestions: ["API Error: " + errorMsg],
+      corrected: "Failed to connect to AI. Please ensure your API key is active and has credits."
     };
   }
 }
@@ -50,25 +79,23 @@ exports.analyzeResumeText = async (req, resumeText, jobDescription) => {
        return { message: 'Missing resume text or job description' };
     }
 
-    // AI Function Call
     const ai = await callGemini(resume, job);
 
-    // Database mein save karein
+    // AI result ko database ke liye validate karein
     const saved = await Resume.create({
       userId: req.user.id,
       originalText: resume,
-      aiImprovedText: ai.corrected,
-      aiScore: ai.score,
-      atsScore: ai.atsScore,
-      suggestions: ai.suggestions
+      aiImprovedText: ai.corrected || "No feedback provided",
+      aiScore: ai.score || 0,
+      atsScore: ai.atsScore || 0,
+      suggestions: Array.isArray(ai.suggestions) ? ai.suggestions : []
     });
 
-    // Frontend ko data bhejien
     return { ai, resume: saved };
 
   } catch (e) {
-    console.error("Controller Error:", e);
-    return { message: 'Server Error' };
+    console.error("analyzeResumeText Controller Error:", e);
+    return { message: 'Server Error during analysis' };
   }
 };
 
