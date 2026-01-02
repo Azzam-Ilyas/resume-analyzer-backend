@@ -5,18 +5,15 @@ async function callGemini(resume, job) {
   const apiKey = process.env.GEMINI_API_KEY; 
   
   if (!apiKey) {
-    console.error("ERROR: GEMINI_API_KEY missing!");
     return {
       score: 0,
-      atsScore: 0,
-      suggestions: ["Backend Config Error: Key Missing"],
-      corrected: "API Key is not configured on the server."
+      suggestions: ["API Key Missing"],
+      corrected: "Please add GEMINI_API_KEY to Vercel."
     };
   }
 
-  // Prompt ko thoda aur sakht kiya hai taaki sirf JSON mile
   const prompt = `Analyze this resume against the job description. 
-  Return ONLY a valid JSON object. No intro text.
+  Return ONLY a valid JSON object.
   {
     "score": 85,
     "atsScore": 80,
@@ -27,52 +24,38 @@ async function callGemini(resume, job) {
   JD: ${job}`;
 
   try {
-    // UPDATED URL: v1beta ki jagah v1 aur gemini-1.5-flash ka stable path
+    // 2026 Latest Stable Endpoint
     const res = await axios.post(
       `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
       { contents: [{ parts: [{ text: prompt }] }] }
     );
 
-    const candidates = res.data?.candidates;
-    if (!candidates || candidates.length === 0) {
-      throw new Error("No response from AI model.");
+    if (res.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+      let aiText = res.data.candidates[0].content.parts[0].text;
+      const cleanJson = aiText.replace(/```json|```/g, "").trim();
+      return JSON.parse(cleanJson);
     }
-
-    let aiText = candidates[0].content.parts[0].text;
     
-    // Clean Markdown
-    const cleanJsonText = aiText.replace(/```json|```/g, "").trim();
-    
-    try {
-      return JSON.parse(cleanJsonText);
-    } catch (parseError) {
-      return {
-        score: 60,
-        atsScore: 60,
-        suggestions: ["Structure analysis failed, but AI responded."],
-        corrected: aiText.substring(0, 500)
-      };
-    }
+    throw new Error("Empty response from AI");
 
   } catch (error) {
-    // Agar v1 bhi fail ho (kuch regions mein), toh fallback to gemini-pro on v1beta
-    console.error("Gemini v1 failed, trying fallback...");
+    console.error("Gemini Error:", error.response?.data || error.message);
+    
+    // Agar flash fail ho, toh 1.5-pro try karein (Backup Plan)
     try {
-        const fallbackRes = await axios.post(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`,
-            { contents: [{ parts: [{ text: prompt }] }] }
-        );
-        let aiText = fallbackRes.data.candidates[0].content.parts[0].text;
-        const cleanJsonText = aiText.replace(/```json|```/g, "").trim();
-        return JSON.parse(cleanJsonText);
-    } catch (fallbackError) {
-        const errorMsg = fallbackError.response?.data?.error?.message || fallbackError.message;
-        return {
-            score: 0,
-            atsScore: 0,
-            suggestions: ["API Error: " + errorMsg],
-            corrected: "Failed to connect to AI. Please verify model availability in your region."
-        };
+      const backupRes = await axios.post(
+        `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-pro:generateContent?key=${apiKey}`,
+        { contents: [{ parts: [{ text: prompt }] }] }
+      );
+      let aiText = backupRes.data.candidates[0].content.parts[0].text;
+      return JSON.parse(aiText.replace(/```json|```/g, "").trim());
+    } catch (err2) {
+      return {
+        score: 0,
+        atsScore: 0,
+        suggestions: ["Model Error: " + (err2.response?.data?.error?.message || "Version mismatch")],
+        corrected: "Google has updated the model names. Please check your Google AI Studio for the latest available model."
+      };
     }
   }
 }
@@ -82,34 +65,24 @@ exports.analyzeResumeText = async (req, resumeText, jobDescription) => {
     const resume = resumeText || req.body.text;
     const job = jobDescription || req.body.jobDescription;
 
-    if (!resume || !job) {
-       return { message: 'Missing resume text or job description' };
-    }
-
     const ai = await callGemini(resume, job);
 
     const saved = await Resume.create({
       userId: req.user.id,
       originalText: resume,
-      aiImprovedText: ai.corrected || "No feedback provided",
-      aiScore: ai.score || 0,
-      atsScore: ai.atsScore || 0,
-      suggestions: Array.isArray(ai.suggestions) ? ai.suggestions : []
+      aiImprovedText: ai.corrected,
+      aiScore: ai.score,
+      atsScore: ai.atsScore,
+      suggestions: ai.suggestions
     });
 
     return { ai, resume: saved };
-
   } catch (e) {
-    console.error("Controller Error:", e);
-    return { message: 'Server Error during analysis' };
+    return { message: 'Server Error' };
   }
 };
 
 exports.getHistory = async (req, res) => {
-  try {
-    const data = await Resume.find({ userId: req.user.id }).sort({ createdAt: -1 });
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ message: "Error fetching history" });
-  }
+  const data = await Resume.find({ userId: req.user.id }).sort({ createdAt: -1 });
+  res.json(data);
 };
